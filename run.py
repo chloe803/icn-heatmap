@@ -27,8 +27,8 @@ ALPHA_CUTOFF = 0.02
 MAX_DISPLAY_WIDTH = 1200
 JPEG_QUALITY = 80
 
-# ✅ 180ms는 너무 공격적이라 레이아웃 깜빡임이 체감됨 (배포/데스크탑 환경은 특히)
-TICK_MS = 350  # 필요하면 500~800까지 올려도 됨
+# 깜빡임 체감이 있으면 500~900까지 올려도 됨
+TICK_MS = 350
 
 # =============================
 # Utils
@@ -117,7 +117,6 @@ def paste_overlay_on_floorplan_safe(floor: Image.Image, overlay_rgba: np.ndarray
     return out
 
 def _load_font(size: int):
-    # 배포환경에서 arial.ttf가 없을 수 있음
     for name in ["arial.ttf", "AppleGothic.ttf", "DejaVuSans.ttf"]:
         try:
             return ImageFont.truetype(name, size)
@@ -135,32 +134,28 @@ def draw_badge(d: ImageDraw.ImageDraw, xy, text, font, pad=(14, 8), radius=12):
     d.text((x + pad_x, y + pad_y), text, fill=(255, 255, 255, 255), font=font)
 
 def draw_time_overlays(img: Image.Image, cur_text: str, start_text: str, end_text: str):
-    """
-    ✅ 히트맵 위에 '현재 구간' + 'Start/End 실제 시간'을 직관적으로 표시
-    """
     out = img.copy()
     d = ImageDraw.Draw(out, "RGBA")
 
     font_big = _load_font(28)
     font_mid = _load_font(22)
 
-    # 왼쪽 위: 현재 구간(기존처럼)
+    # 왼쪽 위: 현재 구간
     draw_badge(d, (16, 16), cur_text, font_big)
 
-    # 오른쪽 위: Start / End (실제 HH:MM)
-    # (원하는 “사진처럼 직관적”을 위해 상단 오른쪽에 2개 붙여줌)
+    # 오른쪽 위: START / END (실제 HH:MM)
     W, H = out.size
     start_label = f"START {start_text}"
     end_label = f"END {end_text}"
 
-    # 대략적인 폭 계산해서 오른쪽 정렬
     bbox1 = d.textbbox((0, 0), start_label, font=font_mid)
     bbox2 = d.textbbox((0, 0), end_label, font=font_mid)
-    w1 = bbox1[2] - bbox1[0] + 14 * 2
-    w2 = bbox2[2] - bbox2[0] + 14 * 2
+    w1 = (bbox1[2] - bbox1[0]) + 14 * 2
+    w2 = (bbox2[2] - bbox2[0]) + 14 * 2
 
-    x_end = max(16, W - w2 - 16)
     x_start = max(16, W - w1 - 16)
+    x_end = max(16, W - w2 - 16)
+
     draw_badge(d, (x_start, 16), start_label, font_mid)
     draw_badge(d, (x_end, 16 + 44), end_label, font_mid)
 
@@ -210,21 +205,19 @@ if "playing" not in st.session_state:
     st.session_state.playing = False
 if "pos" not in st.session_state:
     st.session_state.pos = 540.0
-if "skip_once" not in st.session_state:
-    st.session_state.skip_once = False
+
+# ✅ 버튼 이벤트는 action으로 저장해서, rerun/refresh에서도 1회만 정확히 처리
+if "action" not in st.session_state:
+    st.session_state.action = None  # "play" | "pause" | "reset" | None
 
 def on_play():
-    st.session_state.playing = True
-    st.session_state.skip_once = True
+    st.session_state.action = "play"
 
 def on_pause():
-    st.session_state.playing = False
-    st.session_state.skip_once = True
+    st.session_state.action = "pause"
 
 def on_reset():
-    st.session_state.playing = False
-    st.session_state.pos = float(st.session_state.get("start_min", 0))
-    st.session_state.skip_once = True
+    st.session_state.action = "reset"
 
 # -------------------------
 # UI (포맷 유지)
@@ -241,7 +234,7 @@ speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
 # clamp pos
 st.session_state.pos = float(max(start, min(st.session_state.pos, end)))
 
-# ✅ 큰 시간 표시: 프레임 index가 아니라 "실제 HH:MM"으로!
+# 큰 시간 표시: 프레임 index가 아니라 실제 HH:MM
 big1, big2 = st.columns(2)
 with big1:
     st.markdown(
@@ -254,9 +247,7 @@ with big2:
         unsafe_allow_html=True,
     )
 
-# ✅ (중요) 여기서 깜빡임 원인 제거:
-# playing일 때 slider를 없애고 info로 바꾸면 레이아웃이 매 tick마다 바뀜 → 깜빡임
-# 그래서 슬라이더는 항상 같은 위치에 유지하고, playing 중에는 disabled=True만!
+# ✅ Minute 슬라이더는 항상 같은 자리에 유지 (playing 중에는 disabled)
 picked = st.slider(
     "Minute (현재 시각)",
     int(start),
@@ -268,7 +259,7 @@ picked = st.slider(
 if not st.session_state.playing:
     st.session_state.pos = float(picked)
 
-# 상태 텍스트도 자리 고정(있다/없다로 레이아웃 흔들리지 않게)
+# 상태 텍스트도 자리 고정
 status_slot = st.empty()
 status_slot.info(
     f"{'Playing...' if st.session_state.playing else 'Paused.'}  "
@@ -289,19 +280,28 @@ st.divider()
 # -------------------------
 # Playback loop
 # -------------------------
-# ✅ (중요) autorefresh key를 매번 바꾸면 DOM이 흔들림 → 고정 key 사용
+# autorefresh는 playing일 때만 (key 고정)
 if st.session_state.playing:
     st_autorefresh(interval=TICK_MS, key="loop")
 
-# skip_once는 버튼 클릭 직후 1회 프레임 점프 방지
-if st.session_state.skip_once:
-    st.session_state.skip_once = False
-else:
-    if st.session_state.playing:
-        st.session_state.pos += float(speed)
-        if st.session_state.pos >= float(end):
-            st.session_state.pos = float(end)
-            st.session_state.playing = False
+# action을 여기서 딱 1번만 처리
+act = st.session_state.action
+st.session_state.action = None
+
+if act == "play":
+    st.session_state.playing = True
+elif act == "pause":
+    st.session_state.playing = False
+elif act == "reset":
+    st.session_state.playing = False
+    st.session_state.pos = float(st.session_state.get("start_min", 0))
+
+# action 처리 이후, playing이면 pos 증가
+if st.session_state.playing:
+    st.session_state.pos += float(speed)
+    if st.session_state.pos >= float(end):
+        st.session_state.pos = float(end)
+        st.session_state.playing = False
 
 # -------------------------
 # Smooth render
@@ -319,13 +319,12 @@ if frac > 0.0 and i1 != i0:
 else:
     grid = grid0
 
-# 현재 표시 텍스트 (기존 구간표시)
 cur_text = fmt_time(i0, TIME_BIN_MIN)
 
 overlay_rgba = frame_to_overlay_rgba(grid, vmax=vmax, lut_rgba=lut)
 composed = paste_overlay_on_floorplan_safe(floor_small, overlay_rgba, heat_extent_scaled)
 
-# ✅ 히트맵 위에 START/END도 “실제 시간(HH:MM)”으로 같이 표시
+# 히트맵 위에 현재 구간 + START/END 실제 시간
 start_hhmm = idx_to_hhmm(int(start), TIME_BIN_MIN)
 end_hhmm = idx_to_hhmm(int(end), TIME_BIN_MIN)
 composed = draw_time_overlays(composed, cur_text, start_hhmm, end_hhmm)
@@ -333,7 +332,7 @@ composed = draw_time_overlays(composed, cur_text, start_hhmm, end_hhmm)
 img_bytes = to_jpeg_bytes(composed.convert("RGB"), quality=JPEG_QUALITY)
 
 # -------------------------
-# Layout (항상 동일하게 유지)
+# Layout
 # -------------------------
 left, right = st.columns([8, 1])
 with left:
