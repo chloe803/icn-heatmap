@@ -26,11 +26,7 @@ ALPHA_CUTOFF = 0.02
 
 MAX_DISPLAY_WIDTH = 1200
 JPEG_QUALITY = 80
-
-# 너무 빠르면 rerun 깜빡임 체감 큼 (Desktop/배포에서 특히)
 TICK_MS = 350  # 필요하면 500~800으로 올려도 됨
-
-POS_KEY = "pos_pick"  # ✅ 위치의 단일 진실(source of truth)
 
 # =============================
 # Utils
@@ -142,10 +138,8 @@ def draw_time_overlays(img: Image.Image, cur_text: str, start_text: str, end_tex
     font_big = _load_font(28)
     font_mid = _load_font(22)
 
-    # 왼쪽 위: 현재 구간
     draw_badge(d, (16, 16), cur_text, font_big)
 
-    # 오른쪽 위: START / END (실제 HH:MM)
     W, _ = out.size
     start_label = f"START {start_text}"
     end_label = f"END {end_text}"
@@ -201,18 +195,26 @@ heat_extent = [
 heat_extent_scaled = [v * scale for v in heat_extent]
 
 # -------------------------
-# State
+# State (안전한 구조)
 # -------------------------
 if "playing" not in st.session_state:
     st.session_state.playing = False
 
-# ✅ 위치 값은 POS_KEY 하나만 쓴다 (pos/resume_pos 같은 이중화 제거)
-if POS_KEY not in st.session_state:
-    st.session_state[POS_KEY] = 540  # 초기 프레임
+# ✅ 재생 위치(프로그램이 바꿔도 되는 값)
+if "pos_val" not in st.session_state:
+    st.session_state.pos_val = 540.0
 
-# 버튼 클릭 직후 1회는 전진 로직 건너뛰기
+# ✅ 사용자 드래그용(슬라이더가 소유하는 값)
+if "pos_pick" not in st.session_state:
+    st.session_state.pos_pick = int(round(st.session_state.pos_val))
+
+# 버튼 클릭 직후 1회는 전진 건너뛰기
 if "skip_once" not in st.session_state:
     st.session_state.skip_once = False
+
+# 버튼 클릭이 있던 rerun에서는 슬라이더가 pos_val을 덮어쓰지 못하게
+if "ui_locked" not in st.session_state:
+    st.session_state.ui_locked = False
 
 # -------------------------
 # UI (포맷 유지)
@@ -226,10 +228,10 @@ if start > end:
 
 speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
 
-# ✅ 범위 바뀌면 현재 위치를 clamp (단일 진실 키를 clamp)
-st.session_state[POS_KEY] = float(max(start, min(float(st.session_state[POS_KEY]), end)))
+# clamp pos_val
+st.session_state.pos_val = float(max(start, min(st.session_state.pos_val, end)))
 
-# 큰 시간 표시 (실제 HH:MM)
+# 큰 시간 표시
 big1, big2 = st.columns(2)
 with big1:
     st.markdown(
@@ -242,7 +244,7 @@ with big2:
         unsafe_allow_html=True,
     )
 
-# 버튼들
+# 버튼
 b1, b2, b3 = st.columns([1.2, 1.2, 7.6])
 with b1:
     play_clicked = st.button("▶ Play", use_container_width=True, key="btn_play")
@@ -251,34 +253,49 @@ with b2:
 with b3:
     reset_clicked = st.button("🔄 Reset", use_container_width=True, key="btn_reset")
 
-# ✅ 버튼 처리 (우선순위: Reset > Pause > Play)
+# ✅ 버튼 처리 (Reset > Pause > Play)
+st.session_state.ui_locked = False
 if reset_clicked:
     st.session_state.playing = False
-    st.session_state[POS_KEY] = float(start)
+    st.session_state.pos_val = float(start)
+    st.session_state.pos_pick = int(round(st.session_state.pos_val))
     st.session_state.skip_once = True
+    st.session_state.ui_locked = True
+
 elif pause_clicked:
     st.session_state.playing = False
+    # pos_val 유지 (멈춘 자리)
+    st.session_state.pos_pick = int(round(st.session_state.pos_val))
     st.session_state.skip_once = True
+    st.session_state.ui_locked = True
+
 elif play_clicked:
     st.session_state.playing = True
-    st.session_state.skip_once = True  # Play 클릭한 그 프레임은 '전진' 안 하고, 다음 tick부터 전진
+    # ✅ 멈춘 자리에서 그대로 재개: pos_val 건드리지 않음
+    st.session_state.pos_pick = int(round(st.session_state.pos_val))
+    st.session_state.skip_once = True
+    st.session_state.ui_locked = True
 
-# Minute 슬라이더 (항상 같은 자리, key=POS_KEY가 곧 현재 위치)
-# ✅ 여기서 value 인자를 주지 않는다. (key가 진실이므로 key만)
-st.slider(
+# Minute 슬라이더 (항상 같은 자리)
+picked = st.slider(
     "Minute (현재 시각)",
     int(start),
     int(end),
-    key=POS_KEY,
+    int(round(st.session_state.pos_val)),
+    key="pos_pick",
     disabled=st.session_state.playing,
 )
 
-# 상태 텍스트 (자리 고정)
+# 사용자가 드래그한 경우에만 pos_val 갱신 (버튼 클릭 rerun에서는 막음)
+if (not st.session_state.playing) and (not st.session_state.ui_locked):
+    st.session_state.pos_val = float(picked)
+
+# 상태 텍스트
 status_slot = st.empty()
 status_slot.info(
     f"{'Playing...' if st.session_state.playing else 'Paused.'}  "
-    f"현재 프레임: {int(float(st.session_state[POS_KEY]))}  "
-    f"({idx_to_hhmm(int(float(st.session_state[POS_KEY])), TIME_BIN_MIN)})"
+    f"현재 프레임: {int(float(st.session_state.pos_val))}  "
+    f"({idx_to_hhmm(int(float(st.session_state.pos_val)), TIME_BIN_MIN)})"
 )
 
 st.divider()
@@ -293,15 +310,15 @@ if st.session_state.skip_once:
     st.session_state.skip_once = False
 else:
     if st.session_state.playing:
-        st.session_state[POS_KEY] = float(st.session_state[POS_KEY]) + float(speed)
-        if float(st.session_state[POS_KEY]) >= float(end):
-            st.session_state[POS_KEY] = float(end)
+        st.session_state.pos_val += float(speed)
+        if st.session_state.pos_val >= float(end):
+            st.session_state.pos_val = float(end)
             st.session_state.playing = False
 
 # -------------------------
 # Smooth render
 # -------------------------
-pos = float(st.session_state[POS_KEY])
+pos = float(st.session_state.pos_val)
 i0 = int(math.floor(pos))
 i0 = max(int(start), min(i0, int(end)))
 i1 = min(i0 + 1, int(end))
@@ -325,9 +342,7 @@ composed = draw_time_overlays(composed, cur_text, start_hhmm, end_hhmm)
 
 img_bytes = to_jpeg_bytes(composed.convert("RGB"), quality=JPEG_QUALITY)
 
-# -------------------------
 # Layout
-# -------------------------
 left, right = st.columns([8, 1])
 with left:
     st.image(img_bytes, use_container_width=True)
