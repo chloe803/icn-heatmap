@@ -1,2 +1,5 @@
 streamlit
+numpy
+pillow
+matplotlib
 streamlit-autorefresh
