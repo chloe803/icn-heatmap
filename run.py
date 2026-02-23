@@ -166,7 +166,7 @@ heat_extent = [
 heat_extent_scaled = [v * scale for v in heat_extent]
 
 # -------------------------
-# State (위젯 key와 겹치는 값은 직접 대입하지 않음!)
+# State
 # -------------------------
 if "playing" not in st.session_state:
     st.session_state.playing = False
@@ -176,6 +176,12 @@ if "skip_once" not in st.session_state:
     st.session_state.skip_once = False
 if "play_seq" not in st.session_state:
     st.session_state.play_seq = 0
+
+# Start/End 변경 감지용
+if "prev_start" not in st.session_state:
+    st.session_state.prev_start = None
+if "prev_end" not in st.session_state:
+    st.session_state.prev_end = None
 
 def on_play():
     st.session_state.playing = True
@@ -188,34 +194,53 @@ def on_pause():
 
 def on_reset():
     st.session_state.playing = False
-    # start_min 위젯 값은 st.session_state["start_min"]에 있음
     st.session_state.pos = float(st.session_state.get("start_min", 0))
     st.session_state.skip_once = True
+    # pos 슬라이더 재생성 유도
+    if "pos_pick" in st.session_state:
+        del st.session_state["pos_pick"]
 
 # -------------------------
 # UI
 # -------------------------
 st.markdown("## ⏰ Time Range")
 
-# ✅ 위젯은 변수로만 받기 (session_state에 직접 대입 X)
-start = st.slider("Start Time", 0, T - 1, 540, key="start_min")
-end = st.slider("End Time", 0, T - 1, 600, key="end_min")
+start_val = st.slider("Start Time", 0, T - 1, 540, key="start_min")
+end_val = st.slider("End Time", 0, T - 1, 600, key="end_min")
+speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
+
+start = int(start_val)
+end = int(end_val)
 if start > end:
     start, end = end, start
 
-speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
+# ✅ Start/End가 바뀌면: pos를 start로 이동 + 재생 중이면 멈춤 + pos 슬라이더 재생성
+changed = (st.session_state.prev_start != start) or (st.session_state.prev_end != end)
+if changed:
+    st.session_state.prev_start = start
+    st.session_state.prev_end = end
+    st.session_state.playing = False
+    st.session_state.pos = float(start)
+    st.session_state.skip_once = True
+    if "pos_pick" in st.session_state:
+        del st.session_state["pos_pick"]
 
 # clamp pos
 st.session_state.pos = float(max(start, min(st.session_state.pos, end)))
 
 big1, big2 = st.columns(2)
 with big1:
-    st.markdown(f"<div style='text-align:center; font-size:44px;'>⏰ {minute_to_hhmm(int(start))}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:center; font-size:44px;'>⏰ {minute_to_hhmm(start)}</div>", unsafe_allow_html=True)
 with big2:
-    st.markdown(f"<div style='text-align:center; font-size:44px;'>⏰ {minute_to_hhmm(int(end))}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:center; font-size:44px;'>⏰ {minute_to_hhmm(end)}</div>", unsafe_allow_html=True)
 
 if not st.session_state.playing:
-    picked = st.slider("Minute (현재 시각)", int(start), int(end), int(round(st.session_state.pos)), key="pos_pick")
+    picked = st.slider(
+        "Minute (현재 시각)",
+        start, end,
+        int(round(st.session_state.pos)),
+        key="pos_pick"
+    )
     st.session_state.pos = float(picked)
 else:
     st.info(f"Playing... 현재 프레임: {int(st.session_state.pos)} ({minute_to_hhmm(int(st.session_state.pos))})")
@@ -250,8 +275,8 @@ else:
 # -------------------------
 pos = float(st.session_state.pos)
 i0 = int(math.floor(pos))
-i0 = max(int(start), min(i0, int(end)))
-i1 = min(i0 + 1, int(end))
+i0 = max(start, min(i0, end))
+i1 = min(i0 + 1, end)
 frac = float(pos - i0) if i1 != i0 else 0.0
 
 grid0 = frames[i0]
