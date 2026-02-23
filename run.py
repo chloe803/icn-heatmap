@@ -27,8 +27,8 @@ ALPHA_CUTOFF = 0.02
 MAX_DISPLAY_WIDTH = 1200
 JPEG_QUALITY = 80
 
-# 깜빡임 체감이 있으면 500~900까지 올려도 됨
-TICK_MS = 350
+# 너무 빠르면 rerun 깜빡임이 체감됨 (Desktop/배포일수록)
+TICK_MS = 350  # 필요하면 500~800으로 올려도 됨
 
 # =============================
 # Utils
@@ -144,7 +144,7 @@ def draw_time_overlays(img: Image.Image, cur_text: str, start_text: str, end_tex
     draw_badge(d, (16, 16), cur_text, font_big)
 
     # 오른쪽 위: START / END (실제 HH:MM)
-    W, H = out.size
+    W, _ = out.size
     start_label = f"START {start_text}"
     end_label = f"END {end_text}"
 
@@ -206,18 +206,9 @@ if "playing" not in st.session_state:
 if "pos" not in st.session_state:
     st.session_state.pos = 540.0
 
-# ✅ 버튼 이벤트는 action으로 저장해서, rerun/refresh에서도 1회만 정확히 처리
-if "action" not in st.session_state:
-    st.session_state.action = None  # "play" | "pause" | "reset" | None
-
-def on_play():
-    st.session_state.action = "play"
-
-def on_pause():
-    st.session_state.action = "pause"
-
-def on_reset():
-    st.session_state.action = "reset"
+# skip_once: 버튼 누른 직후 1회는 "전진" 로직을 건너뛰기(Play 클릭 1번에 즉시 autorefresh 걸리게)
+if "skip_once" not in st.session_state:
+    st.session_state.skip_once = False
 
 # -------------------------
 # UI (포맷 유지)
@@ -234,7 +225,7 @@ speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
 # clamp pos
 st.session_state.pos = float(max(start, min(st.session_state.pos, end)))
 
-# 큰 시간 표시: 프레임 index가 아니라 실제 HH:MM
+# 큰 시간 표시: 실제 HH:MM
 big1, big2 = st.columns(2)
 with big1:
     st.markdown(
@@ -247,7 +238,7 @@ with big2:
         unsafe_allow_html=True,
     )
 
-# ✅ Minute 슬라이더는 항상 같은 자리에 유지 (playing 중에는 disabled)
+# Minute 슬라이더는 항상 같은 자리에 유지 (playing 중 disabled)
 picked = st.slider(
     "Minute (현재 시각)",
     int(start),
@@ -259,7 +250,28 @@ picked = st.slider(
 if not st.session_state.playing:
     st.session_state.pos = float(picked)
 
-# 상태 텍스트도 자리 고정
+# 버튼들 (✅ 콜백/action 버리고 반환값으로 즉시 결정 → 꼬임 방지)
+b1, b2, b3 = st.columns([1.2, 1.2, 7.6])
+with b1:
+    play_clicked = st.button("▶ Play", use_container_width=True, key="btn_play")
+with b2:
+    pause_clicked = st.button("⏸ Pause", use_container_width=True, key="btn_pause")
+with b3:
+    reset_clicked = st.button("🔄 Reset", use_container_width=True, key="btn_reset")
+
+# 버튼 처리 (우선순위: Reset > Pause > Play)
+if reset_clicked:
+    st.session_state.playing = False
+    st.session_state.pos = float(start)
+    st.session_state.skip_once = True  # 버튼 클릭 직후 한 번 전진 방지
+elif pause_clicked:
+    st.session_state.playing = False
+    st.session_state.skip_once = True
+elif play_clicked:
+    st.session_state.playing = True
+    st.session_state.skip_once = True  # ✅ Play 첫 클릭에서 autorefresh는 걸고, pos는 다음 tick부터
+
+# 상태 텍스트 (자리 고정)
 status_slot = st.empty()
 status_slot.info(
     f"{'Playing...' if st.session_state.playing else 'Paused.'}  "
@@ -267,41 +279,24 @@ status_slot.info(
     f"({idx_to_hhmm(int(st.session_state.pos), TIME_BIN_MIN)})"
 )
 
-b1, b2, b3 = st.columns([1.2, 1.2, 7.6])
-with b1:
-    st.button("▶ Play", use_container_width=True, on_click=on_play)
-with b2:
-    st.button("⏸ Pause", use_container_width=True, on_click=on_pause)
-with b3:
-    st.button("🔄 Reset", use_container_width=True, on_click=on_reset)
-
 st.divider()
 
 # -------------------------
 # Playback loop
 # -------------------------
-# autorefresh는 playing일 때만 (key 고정)
+# ✅ Play 클릭한 그 rerun에서도 playing=True가 이미 반영되어 있으므로 autorefresh가 즉시 걸림
 if st.session_state.playing:
     st_autorefresh(interval=TICK_MS, key="loop")
 
-# action을 여기서 딱 1번만 처리
-act = st.session_state.action
-st.session_state.action = None
-
-if act == "play":
-    st.session_state.playing = True
-elif act == "pause":
-    st.session_state.playing = False
-elif act == "reset":
-    st.session_state.playing = False
-    st.session_state.pos = float(st.session_state.get("start_min", 0))
-
-# action 처리 이후, playing이면 pos 증가
-if st.session_state.playing:
-    st.session_state.pos += float(speed)
-    if st.session_state.pos >= float(end):
-        st.session_state.pos = float(end)
-        st.session_state.playing = False
+# ✅ 버튼 클릭 직후 1회는 전진 로직을 건너뛰고(=skip_once), 그 다음 tick부터 전진
+if st.session_state.skip_once:
+    st.session_state.skip_once = False
+else:
+    if st.session_state.playing:
+        st.session_state.pos += float(speed)
+        if st.session_state.pos >= float(end):
+            st.session_state.pos = float(end)
+            st.session_state.playing = False
 
 # -------------------------
 # Smooth render
@@ -324,7 +319,7 @@ cur_text = fmt_time(i0, TIME_BIN_MIN)
 overlay_rgba = frame_to_overlay_rgba(grid, vmax=vmax, lut_rgba=lut)
 composed = paste_overlay_on_floorplan_safe(floor_small, overlay_rgba, heat_extent_scaled)
 
-# 히트맵 위에 현재 구간 + START/END 실제 시간
+# 히트맵 위: 현재 구간 + START/END 실제 시간
 start_hhmm = idx_to_hhmm(int(start), TIME_BIN_MIN)
 end_hhmm = idx_to_hhmm(int(end), TIME_BIN_MIN)
 composed = draw_time_overlays(composed, cur_text, start_hhmm, end_hhmm)
