@@ -17,18 +17,15 @@ NPZ_PATH = BASE_DIR / "frames_cache_1min_grid15px_roll3_WITH_META.npz"
 FLOORPLAN_PATH = BASE_DIR / "ICN_Airport_3F (1).png"
 
 # =============================
-# Visual params (어제 스타일 유지)
+# Visual params
 # =============================
 CMAP_NAME = "jet"
 ALPHA_MAX = 0.85
 ALPHA_GAMMA = 0.6
 ALPHA_CUTOFF = 0.02
 
-# Cloud에서 빠르게 보이게 (전송량↓)
 MAX_DISPLAY_WIDTH = 1200
 JPEG_QUALITY = 80
-
-# 재생 틱
 TICK_MS = 180
 
 # =============================
@@ -156,10 +153,10 @@ T, Hg, Wg = frames.shape
 GRID_PX = int(meta["GRID_PX"])
 TIME_BIN_MIN = int(meta["TIME_BIN_MIN"])
 vmax = float(meta["vmax"])
+
 lut = get_cmap_lut(CMAP_NAME)
 cbar_png = make_colorbar_png(CMAP_NAME, 0.0, vmax)
 
-# 원본 extent -> 축소 extent
 heat_extent = [
     int(meta["min_gx"]) * GRID_PX,
     (int(meta["max_gx"]) + 1) * GRID_PX,
@@ -169,7 +166,7 @@ heat_extent = [
 heat_extent_scaled = [v * scale for v in heat_extent]
 
 # -------------------------
-# State
+# State (위젯 key와 겹치는 값은 직접 대입하지 않음!)
 # -------------------------
 if "playing" not in st.session_state:
     st.session_state.playing = False
@@ -191,7 +188,8 @@ def on_pause():
 
 def on_reset():
     st.session_state.playing = False
-    st.session_state.pos = float(st.session_state.start_min)
+    # start_min 위젯 값은 st.session_state["start_min"]에 있음
+    st.session_state.pos = float(st.session_state.get("start_min", 0))
     st.session_state.skip_once = True
 
 # -------------------------
@@ -199,31 +197,26 @@ def on_reset():
 # -------------------------
 st.markdown("## ⏰ Time Range")
 
-c1, c2 = st.columns(2)
-with c1:
-    st.session_state.start_min = st.slider("Start Time", 0, T - 1, 540, key="start_min")
-with c2:
-    st.session_state.end_min = st.slider("End Time", 0, T - 1, 600, key="end_min")
-
-start = int(st.session_state.start_min)
-end = int(st.session_state.end_min)
+# ✅ 위젯은 변수로만 받기 (session_state에 직접 대입 X)
+start = st.slider("Start Time", 0, T - 1, 540, key="start_min")
+end = st.slider("End Time", 0, T - 1, 600, key="end_min")
 if start > end:
     start, end = end, start
 
-speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25)
+speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
 
 # clamp pos
 st.session_state.pos = float(max(start, min(st.session_state.pos, end)))
 
 big1, big2 = st.columns(2)
 with big1:
-    st.markdown(f"<div style='text-align:center; font-size:44px;'>⏰ {minute_to_hhmm(start)}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:center; font-size:44px;'>⏰ {minute_to_hhmm(int(start))}</div>", unsafe_allow_html=True)
 with big2:
-    st.markdown(f"<div style='text-align:center; font-size:44px;'>⏰ {minute_to_hhmm(end)}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='text-align:center; font-size:44px;'>⏰ {minute_to_hhmm(int(end))}</div>", unsafe_allow_html=True)
 
-# 정지 상태에서만 위치 슬라이더(즉시 히트맵 변경)
 if not st.session_state.playing:
-    st.session_state.pos = float(st.slider("Minute (현재 시각)", start, end, int(round(st.session_state.pos))))
+    picked = st.slider("Minute (현재 시각)", int(start), int(end), int(round(st.session_state.pos)), key="pos_pick")
+    st.session_state.pos = float(picked)
 else:
     st.info(f"Playing... 현재 프레임: {int(st.session_state.pos)} ({minute_to_hhmm(int(st.session_state.pos))})")
 
@@ -248,17 +241,17 @@ if st.session_state.skip_once:
 else:
     if st.session_state.playing:
         st.session_state.pos += float(speed)
-        if st.session_state.pos >= end:
+        if st.session_state.pos >= float(end):
             st.session_state.pos = float(end)
             st.session_state.playing = False
 
 # -------------------------
-# Smooth frame (interpolate)
+# Smooth render
 # -------------------------
 pos = float(st.session_state.pos)
 i0 = int(math.floor(pos))
-i0 = max(start, min(i0, end))
-i1 = min(i0 + 1, end)
+i0 = max(int(start), min(i0, int(end)))
+i1 = min(i0 + 1, int(end))
 frac = float(pos - i0) if i1 != i0 else 0.0
 
 grid0 = frames[i0]
@@ -270,13 +263,9 @@ else:
 
 title_text = fmt_time(i0, TIME_BIN_MIN)
 
-# -------------------------
-# Render (fast path)
-# -------------------------
 overlay_rgba = frame_to_overlay_rgba(grid, vmax=vmax, lut_rgba=lut)
 composed = paste_overlay_on_floorplan_safe(floor_small, overlay_rgba, heat_extent_scaled)
 composed = draw_time_badge(composed, title_text)
-
 img_bytes = to_jpeg_bytes(composed.convert("RGB"), quality=JPEG_QUALITY)
 
 left, right = st.columns([8, 1])
