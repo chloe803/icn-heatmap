@@ -20,9 +20,12 @@ CMAP_NAME = "jet"
 ALPHA_MAX = 0.85
 ALPHA_GAMMA = 0.6
 ALPHA_CUTOFF = 0.02
+
 MAX_DISPLAY_WIDTH = 1200
 JPEG_QUALITY = 82
-TICK_MS = 180
+
+# 깜빡임 줄이기 (180ms는 너무 빠름)
+TICK_MS = 500
 
 
 def minute_to_hhmm(m: int) -> str:
@@ -61,24 +64,24 @@ def get_lut(name: str):
 
 
 def grid_to_rgba(grid: np.ndarray, vmax: float, lut: np.ndarray) -> np.ndarray:
-    # grid: (H, W) float
+    # vmax 안전장치
     if vmax <= 0:
         vmax = float(np.max(grid)) if np.max(grid) > 0 else 1.0
 
     norm = np.clip(grid / vmax, 0.0, 1.0)
+
     alpha = (norm ** ALPHA_GAMMA) * ALPHA_MAX
     alpha = np.where(norm < ALPHA_CUTOFF, 0.0, alpha)
 
     idx = (norm * 255).astype(np.uint8)
-    rgba = lut[idx].copy()  # (H, W, 4)
+    rgba = lut[idx].copy()
     rgba[..., 3] = (alpha * 255).astype(np.uint8)
     return rgba
 
 
 def paste_extent(base: Image.Image, overlay_rgba: np.ndarray, extent_scaled):
     """
-    extent_scaled = [xL, xR, yT, yB] in *scaled floorplan pixel coords*
-    We will paste overlay into that rectangle.
+    extent_scaled = [xL, xR, yT, yB] (scaled floorplan pixel coords)
     """
     out = base.copy()
     xL, xR, yT, yB = extent_scaled
@@ -94,7 +97,7 @@ def paste_extent(base: Image.Image, overlay_rgba: np.ndarray, extent_scaled):
     top = max(0, min(H, top))
     bottom = max(0, min(H, bottom))
 
-    # Ensure proper ordering
+    # 순서 안전장치
     if right < left:
         left, right = right, left
     if bottom < top:
@@ -120,6 +123,9 @@ def to_jpeg(img: Image.Image) -> bytes:
 st.set_page_config(layout="wide")
 st.title("ICN Heatmap")
 
+# 이미지 자리를 고정(깜빡임 감소)
+img_slot = st.empty()
+
 # Load data
 frames, meta = load_npz(NPZ_PATH)
 floor, scale = load_floorplan_scaled(FLOORPLAN_PATH, MAX_DISPLAY_WIDTH)
@@ -139,8 +145,6 @@ min_gy = int(meta.get("min_gy", 0))
 max_gy = int(meta.get("max_gy", frames.shape[1] - 1 if frames.ndim == 3 else 0))
 
 # Extent in original floorplan pixels (unscaled)
-# NOTE: This assumes grid overlay maps to floorplan pixel coordinates directly by GRID_PX.
-# Rectangle boundaries (left, right, top, bottom)
 xL = min_gx * GRID_PX
 xR = (max_gx + 1) * GRID_PX
 yT = min_gy * GRID_PX
@@ -154,26 +158,41 @@ if "playing" not in st.session_state:
     st.session_state.playing = False
 if "pos" not in st.session_state:
     st.session_state.pos = 540.0
-if "prev_start" not in st.session_state:
-    st.session_state.prev_start = None
-if "prev_end" not in st.session_state:
-    st.session_state.prev_end = None
+if "prev_range" not in st.session_state:
+    st.session_state.prev_range = None
 
-start = st.slider("Start Time (index)", 0, T - 1, min(540, T - 1), key="start_min")
-end = st.slider("End Time (index)", 0, T - 1, min(600, T - 1), key="end_min")
-speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
+# ✅ Start/End 두 개 대신 "범위 슬라이더" 하나로 (UI 안정 + 숫자 표시 문제 회피)
+default_start = min(540, T - 1)
+default_end = min(600, T - 1)
+start, end = st.slider(
+    "Time Range (index)",
+    0,
+    T - 1,
+    (default_start, default_end),
+    key="range_min",
+)
 
 start = int(start)
 end = int(end)
 if start > end:
     start, end = end, start
 
-if st.session_state.prev_start != start or st.session_state.prev_end != end:
-    st.session_state.prev_start = start
-    st.session_state.prev_end = end
+speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
+
+# ✅ 슬라이더 아래에 값이 안 보이더라도, 우리가 확실히 표시
+st.caption(
+    f"선택 범위: {minute_to_hhmm(start * TIME_BIN_MIN)} ~ {minute_to_hhmm(end * TIME_BIN_MIN)} "
+    f"(index {start} ~ {end})"
+)
+
+# 범위 바뀌면 재생 상태 초기화
+cur_range = (start, end)
+if st.session_state.prev_range != cur_range:
+    st.session_state.prev_range = cur_range
     st.session_state.playing = False
     st.session_state.pos = float(start)
 
+# pos clamp
 st.session_state.pos = float(max(start, min(st.session_state.pos, end)))
 
 c1, c2, c3 = st.columns([1.2, 1.2, 7.6])
@@ -205,11 +224,12 @@ pos = float(st.session_state.pos)
 i0 = int(math.floor(pos))
 i0 = max(start, min(i0, end))
 
-grid = frames[i0]  # (gy, gx)
+grid = frames[i0]
 overlay = grid_to_rgba(grid, vmax, lut)
 img = paste_extent(floor, overlay, extent_scaled)
 
 d = ImageDraw.Draw(img)
 d.text((16, 16), fmt_time(i0, TIME_BIN_MIN), fill=(255, 255, 255, 255))
 
-st.image(to_jpeg(img), use_container_width=True)
+# ✅ 고정 슬롯에 업데이트 (깜빡임 감소)
+img_slot.image(to_jpeg(img), use_container_width=True)
