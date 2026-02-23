@@ -27,7 +27,7 @@ ALPHA_CUTOFF = 0.02
 MAX_DISPLAY_WIDTH = 1200
 JPEG_QUALITY = 80
 
-# 너무 빠르면 rerun 깜빡임이 체감됨 (Desktop/배포일수록)
+# Desktop/배포에서 180ms는 깜빡임 체감 큼
 TICK_MS = 350  # 필요하면 500~800으로 올려도 됨
 
 # =============================
@@ -140,10 +140,8 @@ def draw_time_overlays(img: Image.Image, cur_text: str, start_text: str, end_tex
     font_big = _load_font(28)
     font_mid = _load_font(22)
 
-    # 왼쪽 위: 현재 구간
     draw_badge(d, (16, 16), cur_text, font_big)
 
-    # 오른쪽 위: START / END (실제 HH:MM)
     W, _ = out.size
     start_label = f"START {start_text}"
     end_label = f"END {end_text}"
@@ -206,7 +204,11 @@ if "playing" not in st.session_state:
 if "pos" not in st.session_state:
     st.session_state.pos = 540.0
 
-# skip_once: 버튼 누른 직후 1회는 "전진" 로직을 건너뛰기(Play 클릭 1번에 즉시 autorefresh 걸리게)
+# ✅ 재개용 포지션(이게 핵심)
+if "resume_pos" not in st.session_state:
+    st.session_state.resume_pos = float(st.session_state.pos)
+
+# 버튼 클릭 직후 한 번은 전진 로직 건너뛰기
 if "skip_once" not in st.session_state:
     st.session_state.skip_once = False
 
@@ -224,8 +226,9 @@ speed = st.slider("Speed", 0.5, 6.0, 2.0, 0.25, key="speed")
 
 # clamp pos
 st.session_state.pos = float(max(start, min(st.session_state.pos, end)))
+st.session_state.resume_pos = float(max(start, min(st.session_state.resume_pos, end)))
 
-# 큰 시간 표시: 실제 HH:MM
+# 큰 시간 표시 (실제 HH:MM)
 big1, big2 = st.columns(2)
 with big1:
     st.markdown(
@@ -238,19 +241,7 @@ with big2:
         unsafe_allow_html=True,
     )
 
-# Minute 슬라이더는 항상 같은 자리에 유지 (playing 중 disabled)
-picked = st.slider(
-    "Minute (현재 시각)",
-    int(start),
-    int(end),
-    int(round(st.session_state.pos)),
-    key="pos_pick",
-    disabled=st.session_state.playing,
-)
-if not st.session_state.playing:
-    st.session_state.pos = float(picked)
-
-# 버튼들 (✅ 콜백/action 버리고 반환값으로 즉시 결정 → 꼬임 방지)
+# 버튼들
 b1, b2, b3 = st.columns([1.2, 1.2, 7.6])
 with b1:
     play_clicked = st.button("▶ Play", use_container_width=True, key="btn_play")
@@ -259,17 +250,47 @@ with b2:
 with b3:
     reset_clicked = st.button("🔄 Reset", use_container_width=True, key="btn_reset")
 
-# 버튼 처리 (우선순위: Reset > Pause > Play)
+# ✅ 버튼 처리 (우선순위: Reset > Pause > Play)
+#    - Pause: 현재 pos를 resume_pos로 저장
+#    - Play: resume_pos에서 재개 (pos를 resume_pos로 복원)
+ui_locked_this_run = False
+
 if reset_clicked:
     st.session_state.playing = False
     st.session_state.pos = float(start)
-    st.session_state.skip_once = True  # 버튼 클릭 직후 한 번 전진 방지
+    st.session_state.resume_pos = float(start)
+    st.session_state.skip_once = True
+    ui_locked_this_run = True
+
 elif pause_clicked:
     st.session_state.playing = False
+    st.session_state.resume_pos = float(st.session_state.pos)  # ✅ 멈춘 지점 저장
     st.session_state.skip_once = True
+    ui_locked_this_run = True
+
 elif play_clicked:
     st.session_state.playing = True
-    st.session_state.skip_once = True  # ✅ Play 첫 클릭에서 autorefresh는 걸고, pos는 다음 tick부터
+    # ✅ 멈춘 지점에서 재개
+    st.session_state.pos = float(st.session_state.resume_pos)
+    st.session_state.skip_once = True
+    ui_locked_this_run = True
+
+# Minute 슬라이더 (항상 같은 자리)
+# ✅ 중요한 점:
+# - playing 중에는 disabled
+# - 그리고 "버튼 클릭이 있던 rerun"에서는 슬라이더가 pos를 덮어쓰지 못하게 함
+picked = st.slider(
+    "Minute (현재 시각)",
+    int(start),
+    int(end),
+    int(round(st.session_state.pos)),
+    key="pos_pick",
+    disabled=st.session_state.playing,
+)
+
+if (not st.session_state.playing) and (not ui_locked_this_run):
+    st.session_state.pos = float(picked)
+    st.session_state.resume_pos = float(st.session_state.pos)  # ✅ 드래그한 지점도 재개 지점으로
 
 # 상태 텍스트 (자리 고정)
 status_slot = st.empty()
@@ -284,11 +305,9 @@ st.divider()
 # -------------------------
 # Playback loop
 # -------------------------
-# ✅ Play 클릭한 그 rerun에서도 playing=True가 이미 반영되어 있으므로 autorefresh가 즉시 걸림
 if st.session_state.playing:
     st_autorefresh(interval=TICK_MS, key="loop")
 
-# ✅ 버튼 클릭 직후 1회는 전진 로직을 건너뛰고(=skip_once), 그 다음 tick부터 전진
 if st.session_state.skip_once:
     st.session_state.skip_once = False
 else:
@@ -297,6 +316,10 @@ else:
         if st.session_state.pos >= float(end):
             st.session_state.pos = float(end)
             st.session_state.playing = False
+            st.session_state.resume_pos = float(st.session_state.pos)
+        else:
+            # 재생 중에도 resume_pos 동기화(중간에 Pause 눌렀을 때 정확히 저장되게)
+            st.session_state.resume_pos = float(st.session_state.pos)
 
 # -------------------------
 # Smooth render
@@ -319,7 +342,6 @@ cur_text = fmt_time(i0, TIME_BIN_MIN)
 overlay_rgba = frame_to_overlay_rgba(grid, vmax=vmax, lut_rgba=lut)
 composed = paste_overlay_on_floorplan_safe(floor_small, overlay_rgba, heat_extent_scaled)
 
-# 히트맵 위: 현재 구간 + START/END 실제 시간
 start_hhmm = idx_to_hhmm(int(start), TIME_BIN_MIN)
 end_hhmm = idx_to_hhmm(int(end), TIME_BIN_MIN)
 composed = draw_time_overlays(composed, cur_text, start_hhmm, end_hhmm)
